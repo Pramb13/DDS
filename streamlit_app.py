@@ -1,52 +1,94 @@
 import streamlit as st
 import cv2
+import dlib
 import numpy as np
-import mediapipe as mp
-from streamlit_webrtc import VideoHTMLAttributes, webrtc_streamer
+from scipy.spatial import distance as dist
 
-# Initialize Mediapipe Face Mesh
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh()
+# Constants for EAR threshold and consecutive frame count
+EAR_THRESHOLD = 0.25
+CONSEC_FRAMES = 20
 
 # Function to calculate Eye Aspect Ratio (EAR)
-def calculate_ear(landmarks):
-    # Define the indices for the left and right eye landmarks
-    left_eye_indices = [362, 385, 387, 263, 373, 380]
-    right_eye_indices = [33, 160, 158, 133, 153, 144]
-    
-    # Calculate EAR for both eyes
-    left_ear = calculate_single_ear(landmarks, left_eye_indices)
-    right_ear = calculate_single_ear(landmarks, right_eye_indices)
-    
-    return (left_ear + right_ear) / 2.0
-
-def calculate_single_ear(landmarks, indices):
-    # Calculate distances for EAR
-    p1 = np.array([landmarks[indices[0]].x, landmarks[indices[0]].y])
-    p2 = np.array([landmarks[indices[1]].x, landmarks[indices[1]].y])
-    p3 = np.array([landmarks[indices[2]].x, landmarks[indices[2]].y])
-    p4 = np.array([landmarks[indices[3]].x, landmarks[indices[3]].y])
-    p5 = np.array([landmarks[indices[4]].x, landmarks[indices[4]].y])
-    p6 = np.array([landmarks[indices[5]].x, landmarks[indices[5]].y])
-    
-    ear = (np.linalg.norm(p2 - p6) + np.linalg.norm(p3 - p5)) / (2.0 * np.linalg.norm(p1 - p4))
+def calculate_ear(eye):
+    A = dist.euclidean(eye[1], eye[5])
+    B = dist.euclidean(eye[2], eye[4])
+    C = dist.euclidean(eye[0], eye[3])
+    ear = (A + B) / (2.0 * C)
     return ear
 
-# Streamlit UI
-st.title("Driver Drowsiness Detection")
-st.write("This application detects drowsiness based on eye aspect ratio.")
+# Load pre-trained face and landmark detectors
+def load_detectors():
+    face_detector = dlib.get_frontal_face_detector()
+    landmark_predictor = dlib.shape_predictor(dlib.dat_file("shape_predictor_68_face_landmarks.dat"))
+    return face_detector, landmark_predictor
 
-# Video Stream
-def video_frame_callback(frame):
-    img = frame.to_ndarray(format="bgr24")
-    results = face_mesh.process(img)
-    
-    if results.multi_face_landmarks:
-        for face_landmarks in results.multi_face_landmarks:
-            ear = calculate_ear(face_landmarks.landmark)
-            if ear < 0.2:  # Threshold for drowsiness
-                cv2.putText(img, "DROWSY!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-    
-    return img
+# Main Streamlit app
+def main():
+    st.title("Driver Drowsiness Detection System")
+    st.sidebar.header("Settings")
+    EAR_THRESHOLD = st.sidebar.slider("EAR Threshold", 0.2, 0.3, 0.25, step=0.01)
+    CONSEC_FRAMES = st.sidebar.slider("Consecutive Frames for Alert", 10, 30, 20)
 
-webrtc_streamer(key="example", video_frame_callback=video_frame_callback)
+    st.write("""
+        This system uses your webcam to monitor eye movements and detect drowsiness. If your eyes remain closed for too long, the system triggers an alert.
+        """)
+
+    # Load face and landmark detectors
+    face_detector, landmark_predictor = load_detectors()
+
+    # Start video capture
+    video_capture = cv2.VideoCapture(0)
+    (lStart, lEnd) = (42, 48)
+    (rStart, rEnd) = (36, 42)
+
+    frame_counter = 0
+    drowsy = False
+
+    stframe = st.empty()
+
+    while True:
+        ret, frame = video_capture.read()
+        if not ret:
+            st.error("Failed to access webcam. Make sure it's connected.")
+            break
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_detector(gray)
+
+        for face in faces:
+            shape = landmark_predictor(gray, face)
+            shape = np.array([[p.x, p.y] for p in shape.parts()])
+
+            left_eye = shape[lStart:lEnd]
+            right_eye = shape[rStart:rEnd]
+
+            left_ear = calculate_ear(left_eye)
+            right_ear = calculate_ear(right_eye)
+
+            ear = (left_ear + right_ear) / 2.0
+
+            if ear < EAR_THRESHOLD:
+                frame_counter += 1
+                if frame_counter >= CONSEC_FRAMES:
+                    drowsy = True
+                    cv2.putText(frame, "DROWSINESS ALERT!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            else:
+                frame_counter = 0
+                drowsy = False
+
+            # Draw contours
+            left_hull = cv2.convexHull(left_eye)
+            right_hull = cv2.convexHull(right_eye)
+            cv2.drawContours(frame, [left_hull], -1, (0, 255, 0), 1)
+            cv2.drawContours(frame, [right_hull], -1, (0, 255, 0), 1)
+
+        stframe.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB")
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    video_capture.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
