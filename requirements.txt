@@ -1,5 +1,6 @@
 streamlit
-opencv-python-headless
-dlib
-numpy
-scipy
+opencv-python
+torch
+torchvision
+matplotlib
+pillow
