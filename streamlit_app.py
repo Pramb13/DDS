@@ -1,60 +1,94 @@
 import streamlit as st
-import cv2
 import torch
+import cv2
+import numpy as np
+from transformers import AutoModelForImageClassification, AutoFeatureExtractor
 from PIL import Image
-from yolov5.models.common import DetectMultiBackend
-from yolov5.utils.general import non_max_suppression, scale_coords
-from yolov5.utils.torch_utils import select_device
+import time
 
-# Load YOLOv5 model
+# Constants
+MODEL_NAME = "facebook/dino-vits16"
+LABELS = ["Not Drowsy", "Drowsy"]
+THRESHOLD = 0.6
+
+# Load Model
 @st.cache_resource
 def load_model():
-    device = select_device("")
-    model = DetectMultiBackend("best.pt", device=device)
-    return model
+    model = AutoModelForImageClassification.from_pretrained(MODEL_NAME)
+    feature_extractor = AutoFeatureExtractor.from_pretrained(MODEL_NAME)
+    return model, feature_extractor
 
-# Process video frames
-def detect_drowsiness(frame, model):
-    img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = model(img, augment=False, size=640)  # Detect objects
-    detections = non_max_suppression(results)
-    
-    alert = False
-    for det in detections:
-        if det is not None and len(det):
-            for *xyxy, conf, cls in det:
-                label = model.names[int(cls)]
-                if label in ["closed_eyes", "yawn"]:
-                    alert = True
-                    cv2.putText(frame, "DROWSY!", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                # Draw bounding box
-                xyxy = [int(x) for x in xyxy]
-                cv2.rectangle(frame, (xyxy[0], xyxy[1]), (xyxy[2], xyxy[3]), (0, 255, 0), 2)
-                cv2.putText(frame, label, (xyxy[0], xyxy[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-    return frame, alert
+def preprocess_image(image, feature_extractor):
+    """ Convert and preprocess image for model input """
+    image = Image.fromarray(image)  # Convert from OpenCV to PIL
+    image = image.resize((224, 224))  # Resize to model input size
+    return feature_extractor(images=image, return_tensors="pt")
 
-# Streamlit UI
-st.title("Driver Drowsiness Detection System")
+def get_prediction(model, inputs):
+    """ Get model prediction and confidence score """
+    with torch.no_grad():
+        outputs = model(**inputs)
+        logits = outputs.logits
+        probabilities = torch.nn.functional.softmax(logits, dim=-1)
+        predicted_class_idx = torch.argmax(probabilities, dim=-1).item()
+        prediction_score = probabilities[0, predicted_class_idx].item()
 
-run = st.checkbox("Start Camera")
-FRAME_WINDOW = st.image([])
+    # Force classification as "Drowsy" if below threshold
+    if prediction_score < THRESHOLD:
+        predicted_class_idx = 1
 
-model = load_model()
+    return predicted_class_idx, prediction_score
 
-if run:
-    cap = cv2.VideoCapture(0)
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            st.error("Camera not detected.")
-            break
-        
-        # Detect drowsiness
-        frame, alert = detect_drowsiness(frame, model)
-        
-        # Display the video frame
-        FRAME_WINDOW.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        if alert:
-            st.warning("Drowsiness Detected! Please take a break.")
-else:
-    st.write("Click the checkbox above to start the camera.")
+def main():
+    """ Main app logic """
+    st.title("Live Drowsiness Detection")
+    st.markdown("### 🚗 Detecting drowsiness in real time using your webcam.")
+
+    model, feature_extractor = load_model()
+    if model is None or feature_extractor is None:
+        st.error("❌ Failed to load the model.")
+        return
+
+    # Start/Stop Button
+    start_button = st.button("Start Detection")
+    stop_button = st.button("Stop Detection")
+
+    # Create an empty container to display frames
+    stframe = st.empty()
+
+    if start_button:
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            st.error("❌ Cannot access webcam.")
+            return
+
+        while not stop_button:
+            ret, frame = cap.read()
+            if not ret:
+                st.error("❌ Failed to capture frame.")
+                break
+
+            # Convert frame to RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            # Preprocess and Predict
+            inputs = preprocess_image(frame_rgb, feature_extractor)
+            predicted_class_idx, prediction_score = get_prediction(model, inputs)
+            prediction_label = LABELS[predicted_class_idx]
+
+            # Draw label on the frame
+            text = f"{prediction_label} ({prediction_score:.2f})"
+            color = (0, 255, 0) if predicted_class_idx == 0 else (0, 0, 255)
+            cv2.putText(frame_rgb, text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2, cv2.LINE_AA)
+
+            # Show frame in Streamlit
+            stframe.image(frame_rgb, channels="RGB", use_column_width=True)
+
+            # Small delay to avoid overloading CPU
+            time.sleep(0.1)
+
+        cap.release()
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
