@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+streamlit
+requests
+langchain
+pinecone-client
+huggingface-hub
+dlib
+opencv-python
+scipy
+imutils
